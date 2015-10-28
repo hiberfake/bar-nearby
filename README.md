@@ -1,1 +1,1 @@
-# NearbyBeacon
+# Bar Nearby
