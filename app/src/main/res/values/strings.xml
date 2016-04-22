@@ -2,6 +2,13 @@
 <resources>
     <string name="app_name">Bar Nearby</string>
 
-    <string name="nearby_running">Nearby wird verwendet.</string>
-    <string name="nearby_stop">Beenden</string>
+    <string name="scan_necessary">Scanne zunächst den NFC-Tag</string>
+    <string name="choosen_table">Du sitzt an Tisch %s</string>
+
+    <string name="nearby_running">Nearby wird verwendet</string>
+
+    <plurals name="messages_found">
+        <item quantity="one">1 Nachricht gefunden</item>
+        <item quantity="other">%d Nachrichten gefunden</item>
+    </plurals>
 </resources>

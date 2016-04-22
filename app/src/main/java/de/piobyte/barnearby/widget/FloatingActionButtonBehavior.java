@@ -3,15 +3,16 @@ package de.piobyte.barnearby.widget;
 import android.content.Context;
 import android.support.design.widget.CoordinatorLayout;
 import android.support.design.widget.FloatingActionButton;
+import android.support.design.widget.Snackbar;
 import android.support.v4.view.ViewCompat;
 import android.util.AttributeSet;
 import android.view.View;
 
-public class ScrollAwareFABBehavior extends FloatingActionButton.Behavior {
+public class FloatingActionButtonBehavior extends FloatingActionButton.Behavior {
 
     private boolean mHidden = false;
 
-    public ScrollAwareFABBehavior(Context context, AttributeSet attrs) {
+    public FloatingActionButtonBehavior(Context context, AttributeSet attrs) {
         super();
     }
 
@@ -48,5 +49,23 @@ public class ScrollAwareFABBehavior extends FloatingActionButton.Behavior {
                 }
             });
         }
+    }
+
+    @Override
+    public boolean layoutDependsOn(CoordinatorLayout parent, FloatingActionButton fab,
+                                   View dependency) {
+        return super.layoutDependsOn(parent, fab, dependency)
+                || (dependency instanceof Snackbar.SnackbarLayout);
+    }
+
+    @Override
+    public boolean onDependentViewChanged(CoordinatorLayout parent, FloatingActionButton fab,
+                                          View dependency) {
+        if (dependency instanceof Snackbar.SnackbarLayout) {
+            float translationY = Math.min(0, dependency.getTranslationY() - dependency.getHeight());
+            fab.setTranslationY(translationY);
+            return true;
+        }
+        return super.onDependentViewChanged(parent, fab, dependency);
     }
 }

@@ -1,47 +1,35 @@
 package de.piobyte.barnearby.activity;
 
-import android.animation.Animator;
-import android.animation.AnimatorSet;
-import android.animation.ObjectAnimator;
-import android.app.Dialog;
-import android.app.DialogFragment;
-import android.content.DialogInterface;
+import android.app.Activity;
 import android.content.Intent;
 import android.content.IntentSender;
-import android.graphics.Bitmap;
-import android.graphics.Color;
 import android.nfc.NdefMessage;
 import android.nfc.NdefRecord;
 import android.nfc.NfcAdapter;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.Parcelable;
 import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
 import android.support.design.widget.CoordinatorLayout;
 import android.support.design.widget.FloatingActionButton;
 import android.support.design.widget.Snackbar;
+import android.support.v4.app.ActivityCompat;
+import android.support.v4.app.ActivityOptionsCompat;
+import android.support.v4.util.Pair;
+import android.support.v4.view.ViewCompat;
 import android.support.v4.widget.ContentLoadingProgressBar;
 import android.support.v7.app.AppCompatActivity;
-import android.support.v7.graphics.Palette;
 import android.support.v7.widget.RecyclerView;
 import android.support.v7.widget.Toolbar;
 import android.util.Log;
 import android.view.View;
-import android.view.ViewAnimationUtils;
-import android.view.ViewGroup;
-import android.view.animation.AccelerateDecelerateInterpolator;
-import android.view.animation.Interpolator;
-import android.widget.ImageView;
-import android.widget.TextView;
+import android.view.Window;
+import android.widget.Toast;
 
-import com.bumptech.glide.Glide;
-import com.bumptech.glide.load.engine.DiskCacheStrategy;
 import com.firebase.client.Firebase;
-import com.firebase.ui.FirebaseRecyclerViewAdapter;
-import com.github.florent37.glidepalette.GlidePalette;
 import com.google.android.gms.common.ConnectionResult;
-import com.google.android.gms.common.GoogleApiAvailability;
+import com.google.android.gms.common.api.CommonStatusCodes;
 import com.google.android.gms.common.api.GoogleApiClient;
 import com.google.android.gms.common.api.ResultCallback;
 import com.google.android.gms.common.api.Status;
@@ -49,150 +37,169 @@ import com.google.android.gms.nearby.Nearby;
 import com.google.android.gms.nearby.messages.Message;
 import com.google.android.gms.nearby.messages.MessageListener;
 import com.google.android.gms.nearby.messages.Strategy;
+import com.google.android.gms.nearby.messages.SubscribeOptions;
+
+import java.util.ArrayList;
 
 import de.piobyte.barnearby.R;
-import de.piobyte.barnearby.data.Locality;
-import de.piobyte.barnearby.util.UiUtils;
+import de.piobyte.barnearby.adapter.LocalitiesAdapter;
+import de.piobyte.barnearby.service.BackgroundSubscribeIntentService;
+import de.piobyte.barnearby.util.CacheUtils;
 import de.piobyte.barnearby.widget.OffsetDecoration;
 
 public class MainActivity extends AppCompatActivity implements GoogleApiClient.ConnectionCallbacks,
-        GoogleApiClient.OnConnectionFailedListener {
+        GoogleApiClient.OnConnectionFailedListener, LocalitiesAdapter.OnItemClickListener {
 
     private static final String TAG = MainActivity.class.getSimpleName();
 
     // Request code to use when launching the resolution activity
     private static final int REQUEST_RESOLVE_ERROR = 1001;
-    // Unique tag for the error dialog fragment
-    private static final String DIALOG_ERROR = "dialog_error";
 
-    private static final Interpolator INTERPOLATOR = new AccelerateDecelerateInterpolator();
+    private static final String KEY_SUB_STATE = "sub-state";
+    private static final String KEY_RESOLVING_ERROR = "resolving-error";
 
+    private static final long DEFAULT_DELAY = 1200;
+
+    // Enum to track subscription state.
+    private enum SubState {
+        NOT_SUBSCRIBING,
+        ATTEMPTING_TO_SUBSCRIBE,
+        SUBSCRIBING,
+        ATTEMPTING_TO_UNSUBSCRIBE
+    }
+
+    private Handler mHandler;
+
+    /**
+     * Entry point for Google Play services.
+     */
     private GoogleApiClient mGoogleApiClient;
-    // Bool to track whether the app is already resolving an error
+
+    // Fields for tracking subscription state.
+    private SubState mSubState = SubState.NOT_SUBSCRIBING;
+
+    /**
+     * Tracks if we are currently resolving an error related to Nearby permissions. Used to avoid
+     * duplicate Nearby permission dialogs if the user initiates both subscription and publication
+     * actions without having opted into Nearby.
+     */
     private boolean mResolvingError = false;
 
     private CoordinatorLayout mCoordinatorLayout;
     private FloatingActionButton mFab;
     private ContentLoadingProgressBar mProgressBar;
+    private RecyclerView mRecyclerView;
 
-    private final View.OnClickListener mFabClickListener = new View.OnClickListener() {
+    private LocalitiesAdapter mAdapter;
+
+    // Create a new message listener.
+    private MessageListener mMessageListener = new MessageListener() {
         @Override
+        public void onFound(final Message message) {
+            int position = Integer.parseInt(new String(message.getContent()));
+            // Do something with the message string.
+            Log.i(TAG, "Found: " + position);
+
+            View child = mRecyclerView.getLayoutManager().getChildAt(position - 1);
+            onItemClick(position - 1, child.findViewById(R.id.image));
+        }
+
+        // Called when a message is no longer detectable nearby.
+        public void onLost(final Message message) {
+            String nearbyMessageString = new String(message.getContent());
+            // Take appropriate action here (update UI, etc.)
+            Log.i(TAG, "Lost: " + nearbyMessageString);
+        }
+    };
+
+    private View.OnClickListener mFabClickListener = new View.OnClickListener() {
         public void onClick(View v) {
-            subscribe();
-        }
-    };
-
-    private final Runnable mPermissionStatusRunnable = new Runnable() {
-        @Override
-        public void run() {
-            // Subscribe to receive nearby messages created by this Developer Console project.
-            // Use Strategy.BLE_ONLY because we are only interested in messages
-            // that we attached to BLE beacons.
-            Nearby.Messages.subscribe(mGoogleApiClient, mMessageListener, Strategy.BLE_ONLY)
-                    .setResultCallback(new CheckingCallback("subscribe()", mSubscribeRunnable));
-        }
-    };
-
-    private final Runnable mSubscribeRunnable = new Runnable() {
-        @Override
-        public void run() {
-            if (mCoordinatorLayout == null) {
+            if (CacheUtils.getCachedNdefRecord(MainActivity.this) == null) {
+                showScanNecessary();
                 return;
             }
-            Snackbar.make(mCoordinatorLayout, R.string.nearby_running, Snackbar.LENGTH_INDEFINITE)
-                    .setAction(R.string.nearby_stop, new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            unsubscribe();
-                        }
-                    })
-                    .show();
-        }
-    };
 
-    private final MessageListener mMessageListener = new MessageListener() {
-        // Called each time a new message is discovered nearby.
-        @Override
-        public void onFound(Message message) {
-            Log.i(TAG, "Found message: " + message);
-            Log.i(TAG, "Message content: " + new String(message.getContent()));
-        }
-
-        // Called when a message is no longer nearby.
-        @Override
-        public void onLost(Message message) {
-            Log.i(TAG, "Lost message: " + message);
+            switch (mSubState) {
+                case NOT_SUBSCRIBING:
+                case ATTEMPTING_TO_UNSUBSCRIBE:
+                    mSubState = SubState.ATTEMPTING_TO_SUBSCRIBE;
+                    subscribe();
+                    break;
+                case SUBSCRIBING:
+                case ATTEMPTING_TO_SUBSCRIBE:
+                    mSubState = SubState.ATTEMPTING_TO_UNSUBSCRIBE;
+                    unsubscribe();
+                    break;
+            }
+            updateFab();
         }
     };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        Log.i(TAG, "onCreate");
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-//        String uuid = "E20A39F473F54BC4A12F17D1AD07A961";
-//        String major = "0000";
-//        String minor = "0000";
-//        byte[] input = hexStringToByteArray(uuid + major + minor);
-//        Log.wtf(TAG, Base64.encodeToString(input, Base64.DEFAULT));
+        if (savedInstanceState != null) {
+            mSubState = (SubState) savedInstanceState.getSerializable(KEY_SUB_STATE);
+            mResolvingError = savedInstanceState.getBoolean(KEY_RESOLVING_ERROR);
+        }
 
-//        getWindow().setBackgroundDrawableResource(R.color.grey_200);
+        int spacing = getResources().getDimensionPixelSize(R.dimen.spacing);
 
-        final int spanCount = getResources().getInteger(R.integer.span_count);
-        final int spacing = getResources().getDimensionPixelSize(R.dimen.spacing);
-
-        float imageWidth = UiUtils.getScreenWidth(this);
-        imageWidth -= (spanCount + 1) * spacing;
-        imageWidth /= spanCount;
-        final int imageHeight = (int) (imageWidth / (4f / 3f));
-
-        Firebase firebase = new Firebase("https://scorching-torch-4683.firebaseio.com/localities");
+        mHandler = new Handler();
 
         mGoogleApiClient = new GoogleApiClient.Builder(this)
                 .addApi(Nearby.MESSAGES_API)
                 .addConnectionCallbacks(this)
-                .addOnConnectionFailedListener(this)
+                .enableAutoManage(this, this)
                 .build();
 
         setupToolbar();
 
+        Firebase firebase = new Firebase("https://scorching-torch-4683.firebaseio.com/localities");
+
         mCoordinatorLayout = (CoordinatorLayout) findViewById(R.id.coordinator_layout);
         mFab = (FloatingActionButton) findViewById(R.id.fab);
-        mFab.setOnClickListener(mFabClickListener);
+        if (mFab != null) {
+            mFab.setOnClickListener(mFabClickListener);
+        }
         mProgressBar = (ContentLoadingProgressBar) findViewById(R.id.progress_bar);
 
-        RecyclerView recyclerView = (RecyclerView) findViewById(R.id.recycler_view);
-//        recyclerView.setHasFixedSize(true);
-//        recyclerView.setLayoutManager(new GridLayoutManager(this, spanCount));
-        recyclerView.addItemDecoration(new OffsetDecoration(spacing));
+        mAdapter = new LocalitiesAdapter(firebase, this);
 
-        FirebaseRecyclerViewAdapter<Locality, ViewHolder> adapter =
-                new FirebaseRecyclerViewAdapter<Locality, ViewHolder>(Locality.class,
-                        R.layout.grid_item, ViewHolder.class, firebase) {
-                    @Override
-                    public ViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
-                        ViewHolder viewHolder = super.onCreateViewHolder(parent, viewType);
-                        viewHolder.imageView.getLayoutParams().height = imageHeight;
-                        return viewHolder;
-                    }
-
-                    @Override
-                    protected void populateViewHolder(ViewHolder viewHolder, Locality locality) {
-                        if (mProgressBar.isShown()) {
-                            mProgressBar.hide();
+        mRecyclerView = (RecyclerView) findViewById(R.id.recycler_view);
+        if (mRecyclerView != null) {
+            mRecyclerView.setHasFixedSize(true);
+            mRecyclerView.addItemDecoration(new OffsetDecoration(spacing));
+            mRecyclerView.addOnChildAttachStateChangeListener(
+                    new RecyclerView.OnChildAttachStateChangeListener() {
+                        @Override
+                        public void onChildViewAttachedToWindow(View view) {
+                            if (mProgressBar != null) {
+                                mProgressBar.hide();
+                            }
+                            mFab.show();
+                            mRecyclerView.removeOnChildAttachStateChangeListener(this);
                         }
-                        populateImage(viewHolder, locality.getImage());
-//                        viewHolder.textBackgroundView.setVisibility(View.INVISIBLE);
-                        viewHolder.textView.setText(locality.getName());
-                    }
-                };
-        recyclerView.setAdapter(adapter);
+
+                        @Override
+                        public void onChildViewDetachedFromWindow(View view) {
+                        }
+                    });
+            mRecyclerView.setAdapter(mAdapter);
+        }
+
+        updateFab();
+
+        onNewIntent(getIntent());
     }
 
     @Override
-    protected void onResume() {
-        super.onResume();
-        Intent intent = getIntent();
+    protected void onNewIntent(Intent intent) {
+        Log.i(TAG, "onNewIntent");
+        super.onNewIntent(intent);
         if (NfcAdapter.ACTION_NDEF_DISCOVERED.equals(intent.getAction())) {
             Parcelable[] messages = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES);
             if (messages != null) {
@@ -205,6 +212,22 @@ public class MainActivity extends AppCompatActivity implements GoogleApiClient.C
                     NdefRecord[] ndefRecords = ndefMessage.getRecords();
                     for (NdefRecord ndefRecord : ndefRecords) {
                         Log.i(TAG, "NDEF payload: " + new String(ndefRecord.getPayload()));
+                        // Cache the payload and subscribe for Nearby messages.
+                        CacheUtils.saveNdefRecord(this, ndefRecord);
+
+                        mSubState = SubState.ATTEMPTING_TO_UNSUBSCRIBE;
+                        unsubscribe();
+
+                        showTable();
+
+                        mHandler.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                mSubState = SubState.ATTEMPTING_TO_SUBSCRIBE;
+                                subscribe();
+                                updateFab();
+                            }
+                        }, DEFAULT_DELAY);
                     }
                 }
             }
@@ -213,17 +236,49 @@ public class MainActivity extends AppCompatActivity implements GoogleApiClient.C
 
     @Override
     protected void onStart() {
+        Log.i(TAG, "onStart");
         super.onStart();
-        mGoogleApiClient.connect();
+    }
+
+    @Override
+    protected void onResume() {
+        Log.i(TAG, "onResume");
+        super.onResume();
+    }
+
+    @Override
+    protected void onPause() {
+        Log.i(TAG, "onPause");
+        super.onPause();
+
+        if (isFinishing() && !isChangingConfigurations()) {
+            mSubState = SubState.ATTEMPTING_TO_UNSUBSCRIBE;
+            unsubscribe();
+            BackgroundSubscribeIntentService.cancelNotification(this);
+            CacheUtils.clearCachedNdefRecord(this);
+            CacheUtils.clearCachedMessages(this);
+        }
     }
 
     @Override
     protected void onStop() {
-        if (mGoogleApiClient.isConnected()) {
-            unsubscribe();
-        }
-        mGoogleApiClient.disconnect();
+        Log.i(TAG, "onStop");
         super.onStop();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        Log.i(TAG, "onSaveInstanceState");
+        super.onSaveInstanceState(outState);
+        outState.putSerializable(KEY_SUB_STATE, mSubState);
+        outState.putBoolean(KEY_RESOLVING_ERROR, mResolvingError);
+    }
+
+    @Override
+    protected void onDestroy() {
+        Log.i(TAG, "onDestroy");
+        super.onDestroy();
+        mAdapter.cleanup();
     }
 
     @Override
@@ -231,47 +286,59 @@ public class MainActivity extends AppCompatActivity implements GoogleApiClient.C
         if (requestCode == REQUEST_RESOLVE_ERROR) {
             mResolvingError = false;
             if (resultCode == RESULT_OK) {
+                // User was presented with the Nearby opt-in dialog and pressed "Allow".
+                // Execute the pending subscription and publication tasks here.
+                executePendingSubscriptionTask();
                 // Make sure the app is not already connected or attempting to connect.
-                if (!mGoogleApiClient.isConnecting() && !mGoogleApiClient.isConnected()) {
-                    mGoogleApiClient.connect();
-                } else {
-                    // Permission granted or error resolved successfully
-                    // then we proceed with subscribe.
-                    subscribe();
-                }
+//                if (!mGoogleApiClient.isConnecting() && !mGoogleApiClient.isConnected()) {
+//                    mGoogleApiClient.connect();
+//                } else {
+//                    // Permission granted or error resolved successfully
+//                    // then we proceed with subscribe.
+//                    subscribe();
+//                }
+            } else if (resultCode == Activity.RESULT_CANCELED) {
+                // User declined to opt-in. Reset application state here.
+                resetToDefaultState();
             }
         }
     }
 
     @Override
     public void onConnected(Bundle connectionHint) {
-        // Show the FAB.
-        mFab.show();
+        executePendingSubscriptionTask();
     }
 
     @Override
     public void onConnectionSuspended(int cause) {
-        // Hide the FAB.
-        mFab.hide();
     }
 
     @Override
-    public void onConnectionFailed(ConnectionResult result) {
-        if (!mResolvingError) {
-            if (result.hasResolution()) {
-                try {
-                    mResolvingError = true;
-                    result.startResolutionForResult(this, REQUEST_RESOLVE_ERROR);
-                } catch (IntentSender.SendIntentException e) {
-                    // There was an error with the resolution intent. Try again.
-                    mGoogleApiClient.connect();
-                }
-            } else {
-                // Show dialog using GoogleApiAvailability.getErrorDialog()
-                showErrorDialog(result.getErrorCode());
-                mResolvingError = true;
-            }
+    public void onConnectionFailed(@NonNull ConnectionResult result) {
+        // An unresolvable error has occurred and a connection to Google APIs
+        // could not be established. Display an error message, or handle the failure silently.
+    }
+
+    @Override
+    public void onItemClick(int position, View sharedElement) {
+        Intent intent = new Intent(MainActivity.this, LocalityActivity.class);
+        intent.putExtra(LocalityActivity.EXTRA_LOCALITY, mAdapter.getItem(position));
+
+        ArrayList<Pair<View, String>> pairs = new ArrayList<>();
+
+        pairs.add(Pair.create(sharedElement, ViewCompat.getTransitionName(sharedElement)));
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            View statusBar = findViewById(android.R.id.statusBarBackground);
+            View navigationBar = findViewById(android.R.id.navigationBarBackground);
+
+            pairs.add(Pair.create(statusBar, Window.STATUS_BAR_BACKGROUND_TRANSITION_NAME));
+            pairs.add(Pair.create(navigationBar, Window.NAVIGATION_BAR_BACKGROUND_TRANSITION_NAME));
         }
+
+        ActivityOptionsCompat options = ActivityOptionsCompat.makeSceneTransitionAnimation(
+                this, pairs.toArray(new Pair[pairs.size()]));
+        ActivityCompat.startActivity(MainActivity.this, intent, options.toBundle());
     }
 
     private void setupToolbar() {
@@ -281,200 +348,146 @@ public class MainActivity extends AppCompatActivity implements GoogleApiClient.C
         }
     }
 
-    private void populateImage(final ViewHolder viewHolder, String image) {
-//        Glide.with(this)
-//                .load(image)
-//                .asBitmap()
-//                .diskCacheStrategy(DiskCacheStrategy.ALL)
-//                .centerCrop()
-//                .into(new BitmapImageViewTarget(viewHolder.imageView) {
-//                    @Override
-//                    public void onResourceReady(final Bitmap bitmap,
-//                                                final GlideAnimation<? super Bitmap> animation) {
-////                        super.onResourceReady(bitmap, animation);
-//                        onBitmapReady(viewHolder, bitmap);
-//                    }
-//                });
-        Glide.with(this)
-                .load(image)
-                .diskCacheStrategy(DiskCacheStrategy.RESULT)
-                .centerCrop()
-                .crossFade()
-                .listener(GlidePalette.with(image)
-                        .use(GlidePalette.Profile.VIBRANT)
-                        .intoBackground(viewHolder.itemView.findViewById(R.id.vibrant))
-                        .use(GlidePalette.Profile.VIBRANT_DARK)
-                        .intoBackground(viewHolder.itemView.findViewById(R.id.vibrant_dark))
-                        .use(GlidePalette.Profile.VIBRANT_LIGHT)
-                        .intoBackground(viewHolder.itemView.findViewById(R.id.vibrant_light))
-                        .use(GlidePalette.Profile.MUTED)
-                        .intoBackground(viewHolder.itemView.findViewById(R.id.muted))
-                        .use(GlidePalette.Profile.MUTED_DARK)
-                        .intoBackground(viewHolder.itemView.findViewById(R.id.muted_dark))
-                        .use(GlidePalette.Profile.MUTED_LIGHT)
-                        .intoBackground(viewHolder.itemView.findViewById(R.id.muted_light)))
-                .into(viewHolder.imageView);
-    }
-
-    private void onBitmapReady(ViewHolder viewHolder, final Bitmap bitmap) {
-        final ImageView imageView = viewHolder.imageView;
-        final View textBackgroundView = viewHolder.textBackgroundView;
-        Palette.PaletteAsyncListener listener = new Palette.PaletteAsyncListener() {
-            @Override
-            public void onGenerated(Palette palette) {
-                imageView.setImageBitmap(bitmap);
-                int color = palette.getDarkVibrantColor(Color.TRANSPARENT);
-                if (Color.TRANSPARENT == color) {
-                    color = palette.getDarkMutedColor(Color.TRANSPARENT);
-                }
-                textBackgroundView.setBackgroundColor(color);
-                textBackgroundView.setVisibility(View.VISIBLE);
-
-                final Animator imageAnimation, textAnimation;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    imageAnimation = ViewAnimationUtils.createCircularReveal(
-                            imageView,
-                            imageView.getWidth() / 2, imageView.getHeight(),
-                            0, imageView.getWidth());
-                    textAnimation = ViewAnimationUtils.createCircularReveal(
-                            textBackgroundView,
-                            textBackgroundView.getWidth() / 2, 0,
-                            0, textBackgroundView.getWidth());
-                } else {
-                    imageView.setAlpha(0f);
-                    imageView.animate().alpha(1f);
-                    imageAnimation = ObjectAnimator.ofFloat(imageView, "alpha", 1f);
-                    textBackgroundView.setAlpha(0f);
-                    textBackgroundView.animate().alpha(1f);
-                    textAnimation = ObjectAnimator.ofFloat(textBackgroundView, "alpha", 1f);
-                }
-                AnimatorSet animation = new AnimatorSet();
-                animation.playTogether(imageAnimation, textAnimation);
-                animation.setInterpolator(INTERPOLATOR);
-                animation.start();
-            }
-        };
-        new Palette.Builder(bitmap).generate(listener);
-    }
-
     private void subscribe() {
         // Check the permission and in case of success do the subscription.
-        Nearby.Messages.getPermissionStatus(mGoogleApiClient).setResultCallback(
-                new CheckingCallback("getPermissionStatus()", mPermissionStatusRunnable));
+//        Nearby.Messages.getPermissionStatus(mGoogleApiClient).setResultCallback(
+//                new CheckingCallback("getPermissionStatus()", mPermissionStatusRunnable));
+        if (!mGoogleApiClient.isConnected()) {
+            if (!mGoogleApiClient.isConnecting()) {
+                mGoogleApiClient.connect();
+            }
+            return;
+        }
+
+//        // Clean start every time we start subscribing.
+//        CacheUtils.clearCachedMessage(this);
+
+        Log.i(TAG, "Subscribing for background updates");
+        SubscribeOptions options = new SubscribeOptions.Builder()
+                // Finds messages attached to BLE beacons.
+                // See https://developers.google.com/beacons/
+                .setStrategy(Strategy.BLE_ONLY)
+                .build();
+        Nearby.Messages.subscribe(mGoogleApiClient, mMessageListener, options)
+                .setResultCallback(new ResultCallback<Status>() {
+                    @Override
+                    public void onResult(@NonNull Status status) {
+                        if (status.isSuccess()) {
+                            Log.i(TAG, "Subscribed successfully");
+                            // Subscribed successfully.
+                            mSubState = SubState.SUBSCRIBING;
+                            // Start background service.
+//                            startService(getBackgroundSubscribeServiceIntent());
+                            BackgroundSubscribeIntentService.updateNotification(MainActivity.this);
+                        } else {
+                            // Could not subscribe.
+                            handleUnsuccessfulNearbyResult(status);
+                        }
+                    }
+                });
     }
 
     private void unsubscribe() {
         // Clean up when the user leaves the activity.
+//        Nearby.Messages.unsubscribe(mGoogleApiClient, mMessageListener).setResultCallback(
+//                new CheckingCallback("unsubscribe()", mUnsubscribeRunnable));
+        if (!mGoogleApiClient.isConnected()) {
+            if (!mGoogleApiClient.isConnecting()) {
+                mGoogleApiClient.connect();
+            }
+            return;
+        }
+
         Nearby.Messages.unsubscribe(mGoogleApiClient, mMessageListener)
-                .setResultCallback(new CheckingCallback("unsubscribe()"));
+                .setResultCallback(new ResultCallback<Status>() {
+                    @Override
+                    public void onResult(@NonNull Status status) {
+                        if (status.isSuccess()) {
+                            Log.i(TAG, "Unsubscribed successfully");
+                            // Unsubscribed successfully.
+                            mSubState = SubState.NOT_SUBSCRIBING;
+                            BackgroundSubscribeIntentService.cancelNotification(MainActivity.this);
+                        } else {
+                            // Could not unsubscribe.
+                            handleUnsuccessfulNearbyResult(status);
+                        }
+                    }
+                });
     }
 
-    /* Creates a dialog for an error message. */
-    private void showErrorDialog(int errorCode) {
-        // Create a fragment for the error dialog
-        ErrorDialogFragment dialogFragment = new ErrorDialogFragment();
-        // Pass the error that should be displayed
-        Bundle args = new Bundle();
-        args.putInt(DIALOG_ERROR, errorCode);
-        dialogFragment.setArguments(args);
-        dialogFragment.show(getFragmentManager(), DIALOG_ERROR);
-    }
+//    private PendingIntent getPendingIntent() {
+//        return PendingIntent.getService(this, 0, getBackgroundSubscribeServiceIntent(),
+//                PendingIntent.FLAG_UPDATE_CURRENT);
+//    }
 
-    /* Called from ErrorDialogFragment when the dialog is dismissed. */
-    private void onDialogDismissed() {
-        mResolvingError = false;
-    }
+//    private Intent getBackgroundSubscribeServiceIntent() {
+//        return new Intent(this, BackgroundSubscribeIntentService.class);
+//    }
 
-    public static class ViewHolder extends RecyclerView.ViewHolder {
-        private final ImageView imageView;
-        private final View textBackgroundView;
-        private final TextView textView;
-
-        public ViewHolder(View itemView) {
-            super(itemView);
-            imageView = (ImageView) itemView.findViewById(R.id.image);
-            textBackgroundView = itemView.findViewById(R.id.text_background);
-            textView = (TextView) itemView.findViewById(R.id.text);
-        }
-    }
-
-    /* A fragment to display an error dialog. */
-    public static class ErrorDialogFragment extends DialogFragment {
-        public ErrorDialogFragment() {
-        }
-
-        @Override
-        public Dialog onCreateDialog(Bundle savedInstanceState) {
-            // Get the error code and retrieve the appropriate dialog
-            int errorCode = getArguments().getInt(DIALOG_ERROR);
-            return GoogleApiAvailability.getInstance()
-                    .getErrorDialog(getActivity(), errorCode, REQUEST_RESOLVE_ERROR);
-        }
-
-        @Override
-        public void onDismiss(DialogInterface dialog) {
-            ((MainActivity) getActivity()).onDialogDismissed();
+    private void handleUnsuccessfulNearbyResult(Status status) {
+        if (status.hasResolution()) {
+            if (!mResolvingError) {
+                try {
+                    mResolvingError = true;
+                    status.startResolutionForResult(this, REQUEST_RESOLVE_ERROR);
+                } catch (IntentSender.SendIntentException e) {
+                    mResolvingError = false;
+                    Log.i(TAG, "Failed to resolve error status.", e);
+                }
+            }
+        } else if (!status.isSuccess()) {
+            if (status.getStatusCode() == CommonStatusCodes.NETWORK_ERROR) {
+                Toast.makeText(this, "Keine Internetverbindung", Toast.LENGTH_LONG).show();
+            } else {
+                // To keep things simple, pop a toast for all other error messages.
+                Toast.makeText(this, status.getStatusMessage(), Toast.LENGTH_LONG).show();
+            }
+            resetToDefaultState();
         }
     }
 
     /**
-     * A simple ResultCallback that displays a toast when errors occur.
-     * It also displays the Nearby opt-in dialog when necessary.
+     * Invokes a pending task based on the subscription and publication states.
      */
-    private class CheckingCallback implements ResultCallback<Status> {
-        private final String method;
-        private final Runnable runOnSuccess;
-
-        private CheckingCallback(String method) {
-            this(method, null);
-        }
-
-        private CheckingCallback(String method, @Nullable Runnable runOnSuccess) {
-            this.method = method;
-            this.runOnSuccess = runOnSuccess;
-        }
-
-        @Override
-        public void onResult(@NonNull Status status) {
-            if (status.isSuccess()) {
-                Log.i(TAG, method + " succeeded.");
-                if (runOnSuccess != null) {
-                    runOnSuccess.run();
-                }
-            } else {
-                // Currently, the only resolvable error is that the device is not opted
-                // in to Nearby. Starting the resolution displays an opt-in dialog.
-                if (status.hasResolution()) {
-                    if (!mResolvingError) {
-                        try {
-                            status.startResolutionForResult(MainActivity.this,
-                                    REQUEST_RESOLVE_ERROR);
-                            mResolvingError = true;
-                        } catch (IntentSender.SendIntentException e) {
-                            Log.e(TAG, method + " failed with exception: ", e);
-                        }
-                    } else {
-                        // This will be encountered on initial startup because we do
-                        // both publish and subscribe together. So having a toast while
-                        // resolving dialog is in progress is confusing, so just log it.
-                        Log.i(TAG, method + " failed with status: " + status
-                                + " while resolving error.");
-                    }
-                } else {
-                    Log.e(TAG, method + " failed with : " + status
-                            + " resolving error: " + mResolvingError);
-                }
-            }
+    private void executePendingSubscriptionTask() {
+        if (mSubState == SubState.ATTEMPTING_TO_SUBSCRIBE) {
+            subscribe();
+        } else if (mSubState == SubState.ATTEMPTING_TO_UNSUBSCRIBE) {
+            unsubscribe();
         }
     }
 
-    private static byte[] hexStringToByteArray(String s) {
-        int len = s.length();
-        byte[] data = new byte[len / 2];
-        for (int i = 0; i < len; i += 2) {
-            data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
-                    + Character.digit(s.charAt(i + 1), 16));
+    private void updateFab() {
+        switch (mSubState) {
+            case ATTEMPTING_TO_SUBSCRIBE:
+            case SUBSCRIBING:
+                mFab.setImageResource(R.drawable.ic_stop_white_24dp);
+                break;
+            default:
+                mFab.setImageResource(R.drawable.ic_nearby_white_24dp);
         }
-        return data;
+    }
+
+    private void showScanNecessary() {
+        Snackbar.make(mCoordinatorLayout, R.string.scan_necessary, Snackbar.LENGTH_SHORT)
+                .show();
+    }
+
+    private void showTable() {
+        NdefRecord ndefRecord = CacheUtils.getCachedNdefRecord(this);
+        if (ndefRecord != null) {
+            String payload = new String(ndefRecord.getPayload());
+            String text = getString(R.string.choosen_table, payload);
+            Snackbar.make(mCoordinatorLayout, text, Snackbar.LENGTH_SHORT)
+                    .show();
+        }
+    }
+
+    /**
+     * Resets the state of pending subscription and publication tasks.
+     */
+    private void resetToDefaultState() {
+        mSubState = SubState.NOT_SUBSCRIBING;
+        updateFab();
     }
 }
