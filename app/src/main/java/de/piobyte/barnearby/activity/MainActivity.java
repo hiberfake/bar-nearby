@@ -1,6 +1,8 @@
 package de.piobyte.barnearby.activity;
 
 import android.app.Activity;
+import android.app.NotificationManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.IntentSender;
 import android.nfc.NdefMessage;
@@ -16,12 +18,14 @@ import android.support.design.widget.FloatingActionButton;
 import android.support.design.widget.Snackbar;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.app.ActivityOptionsCompat;
+import android.support.v4.app.NotificationCompat;
 import android.support.v4.util.Pair;
 import android.support.v4.view.ViewCompat;
 import android.support.v4.widget.ContentLoadingProgressBar;
 import android.support.v7.app.AppCompatActivity;
 import android.support.v7.widget.RecyclerView;
 import android.support.v7.widget.Toolbar;
+import android.util.Base64;
 import android.util.Log;
 import android.view.View;
 import android.view.Window;
@@ -45,6 +49,7 @@ import de.piobyte.barnearby.R;
 import de.piobyte.barnearby.adapter.LocalitiesAdapter;
 import de.piobyte.barnearby.service.BackgroundSubscribeIntentService;
 import de.piobyte.barnearby.util.CacheUtils;
+import de.piobyte.barnearby.util.ConvertUtils;
 import de.piobyte.barnearby.widget.OffsetDecoration;
 
 public class MainActivity extends AppCompatActivity implements GoogleApiClient.ConnectionCallbacks,
@@ -59,6 +64,9 @@ public class MainActivity extends AppCompatActivity implements GoogleApiClient.C
     private static final String KEY_RESOLVING_ERROR = "resolving-error";
 
     private static final long DEFAULT_DELAY = 1200;
+
+    private static final String MESSAGE_TYPE_BAR = "bar";
+    private static final String MESSAGE_TYPE_SALE = "sale";
 
     // Enum to track subscription state.
     private enum SubState {
@@ -96,12 +104,23 @@ public class MainActivity extends AppCompatActivity implements GoogleApiClient.C
     private MessageListener mMessageListener = new MessageListener() {
         @Override
         public void onFound(final Message message) {
-            int position = Integer.parseInt(new String(message.getContent()));
-            // Do something with the message string.
-            Log.i(TAG, "Found: " + position);
+            String type = message.getType();
+            switch (type) {
+                case MESSAGE_TYPE_BAR:
+                    int position = Integer.parseInt(new String(message.getContent()));
+                    // Do something with the message string.
+                    Log.i(TAG, "Found: " + position);
 
-            View child = mRecyclerView.getLayoutManager().getChildAt(position - 1);
-            onItemClick(position - 1, child.findViewById(R.id.image));
+                    View child = mRecyclerView.getLayoutManager().getChildAt(position - 1);
+                    onItemClick(position - 1, child.findViewById(R.id.image));
+                    break;
+                case MESSAGE_TYPE_SALE:
+                    // TODO: Show a notification.
+                    Log.i(TAG, "Found: " + new String(message.getContent()));
+
+                    showHappyHour();
+                    break;
+            }
         }
 
         // Called when a message is no longer detectable nearby.
@@ -111,6 +130,16 @@ public class MainActivity extends AppCompatActivity implements GoogleApiClient.C
             Log.i(TAG, "Lost: " + nearbyMessageString);
         }
     };
+
+    private void showHappyHour() {
+        NotificationManager notificationManager =
+                (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this)
+                .setSmallIcon(R.drawable.ic_local_bar_white_24dp)
+                .setContentTitle("Happy Hour")
+                .setContentText("Alle Getränke zum halben Preis");
+        notificationManager.notify(9999, builder.build());
+    }
 
     private View.OnClickListener mFabClickListener = new View.OnClickListener() {
         public void onClick(View v) {
@@ -140,6 +169,12 @@ public class MainActivity extends AppCompatActivity implements GoogleApiClient.C
         Log.i(TAG, "onCreate");
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        String uuid = "E2C56DB5DFFB48D2B060D0F5A71096E1";
+        String major = "0000";
+        String minor = "0000";
+        byte[] input = ConvertUtils.hexStringToByteArray(uuid + major + minor);
+        Log.w("Convert", Base64.encodeToString(input, Base64.DEFAULT));
 
         if (savedInstanceState != null) {
             mSubState = (SubState) savedInstanceState.getSerializable(KEY_SUB_STATE);
@@ -333,7 +368,7 @@ public class MainActivity extends AppCompatActivity implements GoogleApiClient.C
             View navigationBar = findViewById(android.R.id.navigationBarBackground);
 
             pairs.add(Pair.create(statusBar, Window.STATUS_BAR_BACKGROUND_TRANSITION_NAME));
-            pairs.add(Pair.create(navigationBar, Window.NAVIGATION_BAR_BACKGROUND_TRANSITION_NAME));
+//            pairs.add(Pair.create(navigationBar, Window.NAVIGATION_BAR_BACKGROUND_TRANSITION_NAME));
         }
 
         ActivityOptionsCompat options = ActivityOptionsCompat.makeSceneTransitionAnimation(

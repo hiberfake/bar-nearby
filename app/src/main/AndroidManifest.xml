@@ -35,7 +35,7 @@
         </activity>
         <activity
             android:name=".activity.LocalityActivity"
-            android:noHistory="true" />
+            android:theme="@style/Theme.Locality" />
 
         <receiver android:name=".receiver.BluetoothReceiver">
             <intent-filter>

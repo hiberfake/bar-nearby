@@ -77,8 +77,8 @@ public class BackgroundSubscribeIntentService extends IntentService {
                 .setSmallIcon(R.drawable.ic_nearby_white_24dp)
                 .setContentTitle(context.getString(R.string.nearby_running))
                 .setContentText(text)
-                .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
-                .setOngoing(true);
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(text));
+//                .setOngoing(true);
 //                .setContentIntent(pendingIntent)
 //                .addAction(0, context.getString(R.string.nearby_stop), pendingStopIntent);
         notificationManager.notify(MESSAGES_NOTIFICATION_ID, builder.build());
